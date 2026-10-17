@@ -1,4 +1,5 @@
 local config = require 'config.client'
+local isLoggedIn = LocalPlayer.state.isLoggedIn
 local carryPackage = nil
 local packageCoords = nil
 local onDuty = false
@@ -270,14 +271,13 @@ end
 
 local function scrapAnim()
     local time = 5
- 
-    lib.requestAnimDict('mp_car_bomb')
-    TaskPlayAnim(cache.ped, 'mp_car_bomb', 'car_bomb_mechanic', 3.0, 3.0, -1, 16, 0, false, false, false)
+
+    lib.playAnim(cache.ped, 'mp_car_bomb', 'car_bomb_mechanic', 3.0, 3.0, -1, 16, 0, false, false, false)
     local openingDoor = true
 
     CreateThread(function()
         while openingDoor do
-            TaskPlayAnim(cache.ped, 'mp_car_bomb', 'car_bomb_mechanic', 3.0, 3.0, -1, 16, 0, 0, 0, 0)
+            lib.playAnim(cache.ped, 'mp_car_bomb', 'car_bomb_mechanic', 3.0, 3.0, -1, 16, 0, false, false, false)
             Wait(1000)
             time = time - 1
             if time <= 0 then
@@ -288,28 +288,18 @@ local function scrapAnim()
     end)
 end
 
-local function getRandomPackage()
-    packageCoords = config.pickupLocations[math.random(1, #config.pickupLocations)]
+local function getNextPackage(coords)
+    packageCoords = coords
     RegisterPickupTarget(packageCoords)
 end
 
 local function pickupPackage()
     local pos = GetEntityCoords(cache.ped, true)
     local boxModel = config.pickupBoxModel
-    lib.requestModel(boxModel)
-    RequestAnimDict('anim@heists@box_carry@')
-
-    while not HasAnimDictLoaded('anim@heists@box_carry@') do
-        Wait(7)
-    end
-
-    TaskPlayAnim(cache.ped, 'anim@heists@box_carry@', 'idle', 5.0, -1, -1, 50, 0, false, false, false)
-
-    while not HasModelLoaded(boxModel) do
-        Wait(0)
-    end
-
+    lib.requestModel(boxModel, 5000)
+    lib.playAnim(cache.ped, 'anim@heists@box_carry@', 'idle', 5.0, -1, -1, 50, 0, false, false, false)
     local object = CreateObject(boxModel, pos.x, pos.y, pos.z, true, true, true)
+    SetModelAsNoLongerNeeded(boxModel)
     AttachEntityToEntity(object, cache.ped, GetPedBoneIndex(cache.ped, 57005), 0.05, 0.1, -0.3, 300.0, 250.0, 20.0, true, true, false, true, 1, true)
     carryPackage = object
 end
@@ -335,13 +325,9 @@ end
 local function buildInteriorDesign()
     for _, pickuploc in pairs(config.pickupLocations) do
         local model = GetHashKey(config.warehouseObjects[math.random(1, #config.warehouseObjects)])
-        lib.requestModel(model)
-
-        while not HasModelLoaded(model) do
-            Wait(0)
-        end
-
+        lib.requestModel(model, 5000)
         local obj = CreateObject(model, pickuploc.x, pickuploc.y, pickuploc.z, false, true, true)
+        SetModelAsNoLongerNeeded(model)
         PlaceObjectOnGroundProperly(obj)
         FreezeEntityPosition(obj, true)
     end
@@ -436,6 +422,15 @@ local function DrawPackageLocationBlip()
     DrawMarker(2, packageCoords.x, packageCoords.y, packageCoords.z + 3, 0, 0, 0, 180.0, 0, 0, 0.5, 0.5, 0.5, 255, 255, 0, 100, false, false, 2, true, nil, nil, false)
 end
 
+local function DrawDropLocationBlip()
+    if not config.drawDropLocationBlip then
+        return
+    end
+
+    local dropCoords = config.dropLocation
+    DrawMarker(2, dropCoords.x, dropCoords.y, dropCoords.z + 1, 0, 0, 0, 180.0, 0, 0, 0.5, 0.5, 0.5, 255, 255, 0, 100, false, false, 2, true, nil, nil, false)
+end
+
 -- Events
 RegisterNetEvent('qbx_recyclejob:client:target:enterLocation', function()
     enterLocation()
@@ -449,9 +444,15 @@ RegisterNetEvent('qbx_recyclejob:client:target:toggleDuty', function()
     onDuty = not onDuty
 
     if onDuty then
+        local nextPackage = lib.callback.await('qbx_recyclejob:server:startShift', false)
+        if not nextPackage then
+            onDuty = false
+            return
+        end
         exports.qbx_core:Notify(locale("success.you_have_been_clocked_in"), 'success')
-        getRandomPackage()
+        getNextPackage(nextPackage)
     else
+        TriggerServerEvent('qbx_recyclejob:server:endShift')
         exports.qbx_core:Notify(locale("error.you_have_clocked_out"), 'error')
         destroyPickupTarget()
     end
@@ -483,6 +484,7 @@ RegisterNetEvent('qbx_recyclejob:client:target:pickupPackage', function()
             combat = true
         },
     }) then
+        if not lib.callback.await('qbx_recyclejob:server:pickupPackage', false) then return end
         packageCoords = nil
         StopAnimTask(cache.ped, 'mp_car_bomb', 'car_bomb_mechanic', 1.0)
         ClearPedTasks(cache.ped)
@@ -516,26 +518,35 @@ RegisterNetEvent('qbx_recyclejob:client:target:dropPackage', function()
         },
     }) then
         StopAnimTask(cache.ped, 'mp_car_bomb', 'car_bomb_mechanic', 1.0)
-        TriggerServerEvent('qbx_recycle:server:getItem')
-        getRandomPackage()
+        local nextPackage = lib.callback.await('qbx_recyclejob:server:deliverPackage', false)
+        if nextPackage then getNextPackage(nextPackage) end
     else
         exports.qbx_core:Notify(locale('error.canceled'), 'error')
     end
 end)
 
--- Threads
 CreateThread(function()
-    if not LocalPlayer.state.isLoggedIn then return end
-
-    setLocationBlip()
-    registerEntranceTarget()
-
     while true do
-        if onDuty and packageCoords and not carryPackage and config.drawPackageLocationBlip then
+        if config.drawDropLocationBlip and onDuty and carryPackage then
+            DrawDropLocationBlip()
+            Wait(0)
+        elseif config.drawPackageLocationBlip and onDuty and packageCoords and not carryPackage then
             DrawPackageLocationBlip()
             Wait(0)
+        elseif not isLoggedIn then
+            Wait(4000)
         else
-            Wait(500)
+            Wait(1000)
         end
     end
+end)
+
+AddStateBagChangeHandler('isLoggedIn', ('player:%s'):format(cache.serverId), function(_, _, loginState)
+    if isLoggedIn == loginState then return end
+    isLoggedIn = loginState
+end)
+
+CreateThread(function()
+    setLocationBlip()
+    registerEntranceTarget()
 end)
