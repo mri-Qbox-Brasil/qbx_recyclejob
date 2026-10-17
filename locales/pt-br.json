@@ -19,6 +19,7 @@
     "unpacking_the_package": "Desembalando o pacote"
   },
   "error": {
-    "you_have_clocked_out": "Você saiu do registro"
+    "you_have_clocked_out": "Você saiu do registro",
+    "overweight_check": "Você não pode carregar mais itens"
   }
 }
